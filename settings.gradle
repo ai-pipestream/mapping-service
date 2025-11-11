@@ -1,6 +1,8 @@
 pluginManagement {
     repositories {
         gradlePluginPortal()
+        // Ensure plugins can also be resolved from Maven Central (Gradle 9+ recommendation)
+        mavenCentral()
     }
 }
 
