@@ -63,6 +63,11 @@ publishing {
         //noinspection GroovyAssignabilityCheck
         maven(MavenPublication) { publication ->
             from components.java
+            //noinspection GroovyAssignabilityCheck
+            artifact(file("${buildDir}/quarkus-app/quarkus-run.jar")) { artifact ->
+                artifact.classifier = 'runner'
+                artifact.builtBy tasks.named('quarkusBuild')
+            }
             pom {
                 name.set('mapping Service')
                 description.set('User mapping management and authentication service')
