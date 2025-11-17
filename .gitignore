@@ -298,4 +298,5 @@ build
 *.iml
 
 .claude
-bin
+bin/
+.dev-helpers/
