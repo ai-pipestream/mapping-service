@@ -2,12 +2,13 @@ import org.apache.tools.ant.filters.ReplaceTokens
 import org.gradle.plugins.signing.Sign
 
 plugins {
-    id 'pl.allegro.tech.build.axion-release' version '1.21.0'
     alias(libs.plugins.java)
     alias(libs.plugins.quarkus)
     alias(libs.plugins.maven.publish)
     id 'signing'
-    id 'com.gradleup.nmcp' version '1.2.1'
+    alias(libs.plugins.nmcp.single)
+    alias(libs.plugins.axion.release)
+    alias(libs.plugins.proto.toolchain)
 }
 
 scmVersion {
@@ -21,32 +22,45 @@ scmVersion {
     }
 }
 
-def pipelineBomVersion = findProperty('pipelineBomVersion') ?: '0.2.2'
+def pipestreamBomVersion = findProperty('pipestreamBomVersion') ?: '0.7.8'
+
+// Proto toolchain configuration - fetches from Git and generates Java/gRPC code
+pipestreamProtos {
+    sourceMode = 'git'
+
+    modules {
+        register("common") {
+            gitRepo = "https://github.com/ai-pipestream/pipestream-protos.git"
+            gitRef = "main"
+            gitSubdir = "common"
+        }
+        register("admin") {
+            gitRepo = "https://github.com/ai-pipestream/pipestream-protos.git"
+            gitRef = "main"
+            gitSubdir = "admin"
+        }
+    }
+}
 
 dependencies {
     implementation 'io.quarkus:quarkus-container-image-docker'
-    // Import pipeline BOM to align all managed versions
-    implementation platform("ai.pipestream:pipeline-bom:${pipelineBomVersion}")
+    // Import pipestream BOM to align all managed versions
+    // Version defined in gradle.properties as single source of truth
+    implementation platform("ai.pipestream:pipestream-bom:${pipestreamBomVersion}")
 
-    implementation 'io.quarkus:quarkus-grpc'
-    implementation 'io.quarkus:quarkus-arc'
+    implementation libs.quarkus.grpc
+    implementation libs.quarkus.arc
     implementation 'io.quarkus:quarkus-smallrye-health'
+    implementation 'io.quarkus:quarkus-smallrye-stork'
 
-    // Consul integration
-    implementation 'io.quarkus:quarkus-vertx'
+    // Service discovery / registration plumbing
     implementation 'io.smallrye.stork:stork-service-discovery-consul'
+    implementation 'io.smallrye.reactive:smallrye-mutiny-vertx-consul-client'
 
-    implementation("io.smallrye.reactive:smallrye-mutiny-vertx-consul-client")
-
-    // Pipeline libraries (published to Maven Local)
-
-    testImplementation libs.pipestream.grpc.wiremock
-    // Pipestream libraries - versions managed entirely by the BOM/catalog
-    implementation libs.pipestream.compose.devservices
-    implementation libs.pipestream.grpc.stubs
-    implementation libs.pipestream.commons
-    implementation libs.pipestream.dynamic.grpc
-    implementation libs.pipestream.dynamic.grpc.registration.clients
+    // Pipestream platform libraries (managed via BOM/catalog)
+    implementation 'ai.pipestream:pipestream-quarkus-devservices'
+    implementation 'ai.pipestream:quarkus-dynamic-grpc'
+    implementation 'ai.pipestream:pipestream-service-registration'
 
     testImplementation 'io.quarkus:quarkus-junit5'
 }
@@ -133,46 +147,6 @@ publishing {
                     connection.set('scm:git:git://github.com/ai-pipestream/mapping-service.git')
                     developerConnection.set('scm:git:ssh://github.com/ai-pipestream/mapping-service.git')
                     url.set('https://github.com/ai-pipestream/mapping-service')
-                }
-
-                // Ensure BOM/platform dependency is included in dependencyManagement
-                // This ensures Maven Central can resolve dependency versions from the BOM
-                withXml {
-                    def projectNode = asNode()
-                    def dependencyManagementNodes = projectNode.get('dependencyManagement')
-                    def dmNode
-                    def depsNode
-
-                    if (dependencyManagementNodes.isEmpty()) {
-                        // Create dependencyManagement and dependencies nodes
-                        dmNode = projectNode.appendNode('dependencyManagement')
-                        depsNode = dmNode.appendNode('dependencies')
-                    } else {
-                        // Get the first dependencyManagement node
-                        dmNode = dependencyManagementNodes[0]
-                        // Check if it has a dependencies child
-                        def dependenciesNodes = dmNode.get('dependencies')
-                        if (dependenciesNodes.isEmpty()) {
-                            depsNode = dmNode.appendNode('dependencies')
-                        } else {
-                            depsNode = dependenciesNodes[0]
-                        }
-                    }
-
-                    // Check if pipeline-bom already exists
-                    def existingBom = depsNode.children().find { dep ->
-                        dep.groupId?.text() == 'ai.pipestream' &&
-                        dep.artifactId?.text() == 'pipeline-bom'
-                    }
-
-                    if (!existingBom) {
-                        def bomDependency = depsNode.appendNode('dependency')
-                        bomDependency.appendNode('groupId', 'ai.pipestream')
-                        bomDependency.appendNode('artifactId', 'pipeline-bom')
-                        bomDependency.appendNode('version', pipelineBomVersion)
-                        bomDependency.appendNode('type', 'pom')
-                        bomDependency.appendNode('scope', 'import')
-                    }
                 }
             }
         }

@@ -2,10 +2,10 @@ package ai.pipestream.service.mapping;
 
 import com.google.protobuf.Value;
 import ai.pipestream.data.v1.*;
-import ai.pipestream.mapping.ApplyMappingRequest;
-import ai.pipestream.mapping.ApplyMappingResponse;
-import ai.pipestream.mapping.MappingRule;
-import ai.pipestream.mapping.MappingService;
+import ai.pipestream.mapping.v1.ApplyMappingRequest;
+import ai.pipestream.mapping.v1.ApplyMappingResponse;
+import ai.pipestream.mapping.v1.MappingRule;
+import ai.pipestream.mapping.v1.MutinyMappingServiceGrpc;
 import io.quarkus.grpc.GrpcService;
 import io.smallrye.mutiny.Uni;
 import org.jboss.logging.Logger;
@@ -14,12 +14,9 @@ import java.util.List;
 import java.util.Optional;
 
 @GrpcService
-public class MappingServiceImpl implements MappingService {
+public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceImplBase {
 
     private static final Logger LOG = Logger.getLogger(MappingServiceImpl.class);
-
-    // Registration now handled by PlatformRegistrationClient
-    // The old direct Consul registration has been removed
 
     @Override
     public Uni<ApplyMappingResponse> applyMapping(ApplyMappingRequest request) {
@@ -88,9 +85,9 @@ public class MappingServiceImpl implements MappingService {
         String targetPath = mapping.getTargetFieldPaths(0);
 
         switch (config.getAggregationType()) {
-            case CONCATENATE:
+            case AGGREGATION_TYPE_CONCATENATE:
                 return handleConcatenate(docBuilder, mapping.getSourceFieldPathsList(), targetPath, config.getDelimiter());
-            case SUM:
+            case AGGREGATION_TYPE_SUM:
                 return handleSum(docBuilder, mapping.getSourceFieldPathsList(), targetPath);
             default:
                 return false;

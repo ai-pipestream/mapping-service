@@ -3,9 +3,9 @@ package ai.pipestream.service.mapping;
 import com.google.protobuf.util.Values;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessingMapping;
-import ai.pipestream.mapping.ApplyMappingRequest;
-import ai.pipestream.mapping.ApplyMappingResponse;
-import ai.pipestream.mapping.MappingRule;
+import ai.pipestream.mapping.v1.ApplyMappingRequest;
+import ai.pipestream.mapping.v1.ApplyMappingResponse;
+import ai.pipestream.mapping.v1.MappingRule;
 import org.junit.jupiter.api.Test;
 
 import com.google.protobuf.Struct;
@@ -87,7 +87,7 @@ class MappingServiceImplTest {
                 .addSourceFieldPaths("last_name")
                 .addTargetFieldPaths("full_name")
                 .setAggregateConfig(ai.pipestream.data.v1.AggregateConfig.newBuilder()
-                        .setAggregationType(ai.pipestream.data.v1.AggregateConfig.AggregationType.CONCATENATE)
+                        .setAggregationType(ai.pipestream.data.v1.AggregateConfig.AggregationType.AGGREGATION_TYPE_CONCATENATE)
                         .setDelimiter(" "))
                 .build();
 
@@ -122,7 +122,7 @@ class MappingServiceImplTest {
                 .addSourceFieldPaths("val2")
                 .addTargetFieldPaths("sum")
                 .setAggregateConfig(ai.pipestream.data.v1.AggregateConfig.newBuilder()
-                        .setAggregationType(ai.pipestream.data.v1.AggregateConfig.AggregationType.SUM))
+                        .setAggregationType(ai.pipestream.data.v1.AggregateConfig.AggregationType.AGGREGATION_TYPE_SUM))
                 .build();
 
         ApplyMappingRequest request = ApplyMappingRequest.newBuilder()
