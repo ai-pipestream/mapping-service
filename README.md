@@ -8,7 +8,7 @@
 [![Build Status](https://github.com/ai-pipestream/mapping-service/workflows/Build%20and%20Publish/badge.svg)](https://github.com/ai-pipestream/mapping-service/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Java Version](https://img.shields.io/badge/Java-21-blue)](https://openjdk.java.net/projects/jdk/21/)
-[![Quarkus](https://img.shields.io/badge/Quarkus-3.25.0-blue)](https://quarkus.io/)
+[![Quarkus](https://img.shields.io/badge/Quarkus-3.x-blue)](https://quarkus.io/)
 
 ## Overview
 
@@ -47,7 +47,30 @@ source.field → target.field
 Apply transformations to field values:
 - `uppercase`: Convert strings to uppercase
 - `trim`: Remove leading and trailing whitespace
+- `proto_rules`: Execute rule-string syntax directly against the document (see below)
 - Extensible for additional transformations
+
+##### Transform: `proto_rules` (rule-string syntax)
+
+In addition to the simple `uppercase` / `trim` transforms, the service supports a high-performance rule-string mode powered by the lifted `ProtoFieldMapperImpl`. This is useful when you need richer mutations without changing protobufs.
+
+Rules are provided via `TransformConfig.params`:
+- `rules`: a list of rule strings
+- `rule`: a single rule string
+
+Supported rule operations:
+- **Assign**: `target = source` (or `target = "literal"`)
+- **Append**: `target += source` (or `target += "literal"`) — creates/appends to a `ListValue` under `Struct` keys
+- **Clear**: `-target` — removes a field/key
+
+Examples:
+
+```
+search_metadata.custom_fields.output_title = search_metadata.custom_fields.headline
+search_metadata.custom_fields.items += "a"
+search_metadata.custom_fields.items += "b"
+-search_metadata.custom_fields.to_clear
+```
 
 #### 3. **AGGREGATE Mapping**
 Combine multiple source fields into a single target field:
@@ -73,7 +96,7 @@ Divide a single source field into multiple target fields:
 
 ### Technology Stack
 
-- **Framework**: [Quarkus 3.25.0](https://quarkus.io/) - Supersonic Subatomic Java
+- **Framework**: [Quarkus 3.30.3](https://quarkus.io/) - Supersonic Subatomic Java
 - **RPC**: gRPC with Protocol Buffers
 - **Service Discovery**: Consul via Stork
 - **Build Tool**: Gradle 8.x with Gradle Wrapper
@@ -172,9 +195,9 @@ Expected response:
 ./gradlew build -Dquarkus.container-image.build=true
 
 # Run the container
-docker run -p 38104:38104 \
-  -e QUARKUS_HTTP_PORT=38104 \
-  -e SERVICE_REGISTRATION_ENABLED=true \
+docker run -p 8080:8080 \
+  -e QUARKUS_HTTP_PORT=8080 \
+  -e PIPESTREAM_REGISTRATION_ENABLED=true \
   ghcr.io/ai-pipestream/mapping-service:latest
 ```
 
@@ -199,34 +222,37 @@ The service can be configured via `application.properties` or environment variab
 
 ```properties
 quarkus.application.name=mapping-service
-service.registration.service-name=mapping-service
-service.registration.port=38104
+pipestream.registration.service-name=mapping-service
 ```
 
 #### Service Registration
 
 ```properties
-service.registration.enabled=true
-service.registration.service-type=APPLICATION
-service.registration.capabilities=document-mapping,text-transformation,grpc-mapping
-service.registration.tags=processing,documents,core-service
+pipestream.registration.enabled=true
+pipestream.registration.description=Document mapping and transformation service
+pipestream.registration.type=SERVICE
+pipestream.registration.advertised-host=${MAPPING_SERVICE_HOST:host.docker.internal}
+pipestream.registration.advertised-port=${quarkus.http.port}
+pipestream.registration.internal-host=${DOCKER_BRIDGE_IP:172.17.0.1}
+pipestream.registration.internal-port=${quarkus.http.port}
+pipestream.registration.capabilities=document-mapping,text-transformation,grpc-mapping
+pipestream.registration.tags=processing,documents,core-service
 ```
 
 #### Network Configuration
 
 ```properties
-quarkus.http.port=38104
+quarkus.http.port=8080
 quarkus.http.host=0.0.0.0
+quarkus.http.root-path=/mapping
 quarkus.grpc.server.use-separate-server=false
 ```
 
-#### Consul Integration
+#### Registration service connection (platform-registration-service)
 
 ```properties
-pipeline.consul.enabled=true
-pipeline.consul.host=localhost
-pipeline.consul.port=8500
-quarkus.stork.my-service.service-discovery.type=consul
+pipestream.registration.registration-service.host=localhost
+pipestream.registration.registration-service.port=38101
 ```
 
 #### Health Checks
@@ -241,17 +267,21 @@ quarkus.grpc.server.enable-health-service=true
 Override configuration using environment variables:
 
 ```bash
-export QUARKUS_HTTP_PORT=38104
-export SERVICE_REGISTRATION_ENABLED=true
-export PIPELINE_CONSUL_HOST=consul.example.com
-export PIPELINE_CONSUL_PORT=8500
+export QUARKUS_HTTP_PORT=8080
+export QUARKUS_HTTP_ROOT_PATH=/mapping
+export PIPESTREAM_REGISTRATION_ENABLED=true
+export PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_HOST=localhost
+export PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_PORT=38101
+# Optional: influence service discovery / registration addresses
+export MAPPING_SERVICE_HOST=host.docker.internal
+export DOCKER_BRIDGE_IP=172.17.0.1
 ```
 
 ## API Reference
 
 ### gRPC Service Definition
 
-**Package**: `ai.pipestream.mapping`
+**Package**: `ai.pipestream.mapping.v1`
 **Service**: `MappingService`
 
 #### Method: `applyMapping`
@@ -317,7 +347,7 @@ Apply uppercase transformation:
           "type": "TRANSFORM",
           "sourceFieldPath": "name",
           "targetFieldPath": "upperName",
-          "transformType": "uppercase"
+          "transformConfig": { "ruleName": "uppercase" }
         }
       ]
     }
@@ -327,6 +357,35 @@ Apply uppercase transformation:
 
 **Input**: `name = "john doe"`
 **Result**: `upperName = "JOHN DOE"`
+
+#### Example 2b: Transform Mapping (`proto_rules`)
+
+Execute rule-string syntax (assign / append / clear) via `TransformConfig.params`:
+
+```json
+{
+  "rules": [
+    {
+      "candidateMappings": [
+        {
+          "type": "TRANSFORM",
+          "transformConfig": {
+            "ruleName": "proto_rules",
+            "params": {
+              "rules": [
+                "search_metadata.custom_fields.output_title = search_metadata.custom_fields.headline",
+                "-search_metadata.custom_fields.to_clear",
+                "search_metadata.custom_fields.items += \"a\"",
+                "search_metadata.custom_fields.items += \"b\""
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
 
 #### Example 3: Aggregate Mapping (Concatenate)
 
@@ -412,10 +471,9 @@ The service will try `preferredName` first, then `firstName`, then `username` un
 ### Java Client Example
 
 ```java
-import ai.pipestream.mapping.MappingServiceGrpc;
-import ai.pipestream.mapping.ApplyMappingRequest;
-import ai.pipestream.mapping.MappingRule;
-import ai.pipestream.mapping.ProcessingMapping;
+import ai.pipestream.mapping.v1.MappingServiceGrpc;
+import ai.pipestream.mapping.v1.ApplyMappingRequest;
+import ai.pipestream.mapping.v1.MappingRule;
 import ai.pipestream.data.v1.PipeDoc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -437,14 +495,16 @@ public class MappingClient {
             // ... build your document
             .build();
 
+        // NOTE: candidateMappings are ai.pipestream.data.v1.ProcessingMapping
+        ai.pipestream.data.v1.ProcessingMapping mapping =
+            ai.pipestream.data.v1.ProcessingMapping.newBuilder()
+                .setMappingType(ai.pipestream.data.v1.MappingType.MAPPING_TYPE_DIRECT)
+                .addSourceFieldPaths("sourceField")
+                .addTargetFieldPaths("targetField")
+                .build();
+
         MappingRule rule = MappingRule.newBuilder()
-            .addCandidateMappings(
-                ProcessingMapping.newBuilder()
-                    .setType(ProcessingMapping.MappingType.DIRECT)
-                    .setSourceFieldPath("sourceField")
-                    .setTargetFieldPath("targetField")
-                    .build()
-            )
+            .addCandidateMappings(mapping)
             .build();
 
         ApplyMappingRequest request = ApplyMappingRequest.newBuilder()
@@ -678,31 +738,33 @@ spec:
       - name: mapping-service
         image: ghcr.io/ai-pipestream/mapping-service:latest
         ports:
-        - containerPort: 38104
+        - containerPort: 8080
           name: grpc
           protocol: TCP
-        - containerPort: 38104
+        - containerPort: 8080
           name: http
           protocol: TCP
         env:
         - name: QUARKUS_HTTP_PORT
-          value: "38104"
-        - name: SERVICE_REGISTRATION_ENABLED
+          value: "8080"
+        - name: QUARKUS_HTTP_ROOT_PATH
+          value: "/mapping"
+        - name: PIPESTREAM_REGISTRATION_ENABLED
           value: "true"
-        - name: PIPELINE_CONSUL_HOST
-          value: "consul.default.svc.cluster.local"
-        - name: PIPELINE_CONSUL_PORT
-          value: "8500"
+        - name: PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_HOST
+          value: "platform-registration-service"
+        - name: PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_PORT
+          value: "38101"
         livenessProbe:
           httpGet:
-            path: /health/live
-            port: 38104
+            path: /mapping/health/live
+            port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /health/ready
-            port: 38104
+            path: /mapping/health/ready
+            port: 8080
           initialDelaySeconds: 5
           periodSeconds: 5
         resources:
@@ -825,17 +887,16 @@ The project includes a comprehensive CI/CD pipeline (`.github/workflows/build-an
 
 ### Core Dependencies
 
-- **Quarkus Platform**: 3.25.0
+- **Quarkus Platform**: 3.30.3
   - `quarkus-grpc`: gRPC support
   - `quarkus-smallrye-health`: Health checks
   - `quarkus-container-image-docker`: Container image building
 
 - **Pipestream Libraries**:
-  - `ai.pipestream:pipeline-bom`: Version management
-  - `ai.pipestream:grpc-stubs`: Protobuf definitions
-  - `ai.pipestream:commons`: Common utilities
-  - `ai.pipestream:dynamic-grpc`: Dynamic service discovery
-  - `ai.pipestream:compose-devservices`: Development services
+  - `ai.pipestream:pipestream-bom`: Version alignment (via Gradle platform/BOM)
+  - `ai.pipestream:quarkus-dynamic-grpc`: Dynamic service discovery / client plumbing
+  - `ai.pipestream:pipestream-quarkus-devservices`: Shared compose devservices integration
+  - `ai.pipestream:pipestream-service-registration`: Service registration integration
 
 ### Test Dependencies
 
@@ -867,21 +928,18 @@ kill -9 <PID>
 export QUARKUS_HTTP_PORT=38105
 ```
 
-#### Service Not Registering with Consul
+#### Service Not Registering (registration service unreachable)
 
 ```
-Warn: Failed to register with Consul
+Warn: Failed to register
 ```
 
-**Solution**: Check Consul connectivity:
+**Solution**: Check the platform-registration-service connectivity/config:
 
 ```bash
-# Test Consul connection
-curl http://localhost:8500/v1/agent/services
-
-# Check Consul host configuration
-export PIPELINE_CONSUL_HOST=<consul-host>
-export PIPELINE_CONSUL_PORT=8500
+# Configure/verify registration service host+port
+export PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_HOST=localhost
+export PIPESTREAM_REGISTRATION_REGISTRATION_SERVICE_PORT=38101
 ```
 
 #### gRPC Connection Refused
@@ -894,7 +952,7 @@ Error: UNAVAILABLE: io exception
 
 ```bash
 # Check if service is running
-curl http://localhost:38104/health
+curl http://localhost:38104/mapping/health
 
 # Test gRPC connectivity with grpcurl
 grpcurl -plaintext localhost:38104 list
@@ -972,13 +1030,9 @@ Typical performance characteristics (tested on 4-core, 16GB machine):
 
 ### Version History
 
-- **0.1.2-SNAPSHOT** (Current)
-  - Core mapping functionality (DIRECT, TRANSFORM, AGGREGATE, SPLIT)
-  - Fallback support
-  - Service discovery integration
-  - Comprehensive test coverage
-  - CI/CD pipeline
-  - Docker support
+- **0.1.3**
+  - Adds `proto_rules` transform mode (rule-string syntax: assign/append/clear) for high-performance in-place protobuf mapping.
+  - Improves descriptor-loader coverage and hardens workflow/publishing configuration.
 
 ## Contributing
 
