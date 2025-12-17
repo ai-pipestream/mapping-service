@@ -11,6 +11,9 @@ import org.junit.jupiter.api.Test;
 import com.google.protobuf.Struct;
 import ai.pipestream.data.v1.SearchMetadata;
 import ai.pipestream.data.v1.MappingType;
+import ai.pipestream.data.v1.TransformConfig;
+
+import com.google.protobuf.ListValue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,6 +69,119 @@ class MappingServiceImplTest {
         PipeDoc resultDoc = response.getDocument();
         assertTrue(resultDoc.getSearchMetadata().getCustomFields().getFieldsMap().containsKey("output_title"), "The target field should exist.");
         assertEquals("This is the headline", resultDoc.getSearchMetadata().getCustomFields().getFieldsOrThrow("output_title").getStringValue());
+    }
+
+    @Test
+    void testTransformWithProtoRuleSyntax() {
+        MappingServiceImpl service = new MappingServiceImpl();
+
+        Struct customFields = Struct.newBuilder()
+                .putFields("headline", Values.of("This is the headline"))
+                .build();
+
+        PipeDoc sourceDoc = PipeDoc.newBuilder()
+                .setSearchMetadata(SearchMetadata.newBuilder().setCustomFields(customFields))
+                .build();
+
+        // Use the lifted ProtoFieldMapper rule syntax via TransformConfig.params
+        ListValue rulesList = ListValue.newBuilder()
+                .addValues(Values.of("search_metadata.custom_fields.output_title = search_metadata.custom_fields.headline"))
+                .addValues(Values.of("search_metadata.custom_fields.literal = \"ok\""))
+                .build();
+
+        TransformConfig transformConfig = TransformConfig.newBuilder()
+                .setRuleName("proto_rules")
+                .setParams(Struct.newBuilder()
+                        .putFields("rules", Values.of(rulesList))
+                        .build())
+                .build();
+
+        ProcessingMapping ruleMapping = ProcessingMapping.newBuilder()
+                .setMappingType(MappingType.MAPPING_TYPE_TRANSFORM)
+                // For proto_rules, the service ignores source/target field paths
+                .setTransformConfig(transformConfig)
+                .build();
+
+        ApplyMappingRequest request = ApplyMappingRequest.newBuilder()
+                .setDocument(sourceDoc)
+                .addRules(MappingRule.newBuilder().addCandidateMappings(ruleMapping))
+                .build();
+
+        ApplyMappingResponse response = service.applyMapping(request).await().indefinitely();
+        PipeDoc resultDoc = response.getDocument();
+
+        assertEquals("This is the headline",
+                resultDoc.getSearchMetadata().getCustomFields().getFieldsOrThrow("output_title").getStringValue());
+        assertEquals("ok",
+                resultDoc.getSearchMetadata().getCustomFields().getFieldsOrThrow("literal").getStringValue());
+    }
+
+    @Test
+    void testDirectMappingSupportsExplicitSearchMetadataPath() {
+        MappingServiceImpl service = new MappingServiceImpl();
+
+        PipeDoc sourceDoc = PipeDoc.newBuilder()
+                .setSearchMetadata(SearchMetadata.newBuilder().setTitle("Hello"))
+                .build();
+
+        ProcessingMapping mapping = ProcessingMapping.newBuilder()
+                .setMappingType(MappingType.MAPPING_TYPE_DIRECT)
+                .addSourceFieldPaths("search_metadata.title")
+                .addTargetFieldPaths("output_title")
+                .build();
+
+        ApplyMappingRequest request = ApplyMappingRequest.newBuilder()
+                .setDocument(sourceDoc)
+                .addRules(MappingRule.newBuilder().addCandidateMappings(mapping))
+                .build();
+
+        PipeDoc resultDoc = service.applyMapping(request).await().indefinitely().getDocument();
+        assertEquals("Hello",
+                resultDoc.getSearchMetadata().getCustomFields().getFieldsOrThrow("output_title").getStringValue());
+    }
+
+    @Test
+    void testTransformWithProtoRuleSyntaxSupportsClearAndAppend() {
+        MappingServiceImpl service = new MappingServiceImpl();
+
+        Struct customFields = Struct.newBuilder()
+                .putFields("to_clear", Values.of("bye"))
+                .build();
+
+        PipeDoc sourceDoc = PipeDoc.newBuilder()
+                .setSearchMetadata(SearchMetadata.newBuilder().setCustomFields(customFields))
+                .build();
+
+        ListValue rulesList = ListValue.newBuilder()
+                // clear a key
+                .addValues(Values.of("-search_metadata.custom_fields.to_clear"))
+                // create repeated list via append
+                .addValues(Values.of("search_metadata.custom_fields.items += \"a\""))
+                .addValues(Values.of("search_metadata.custom_fields.items += \"b\""))
+                .build();
+
+        TransformConfig transformConfig = TransformConfig.newBuilder()
+                .setRuleName("proto_rules")
+                .setParams(Struct.newBuilder().putFields("rules", Values.of(rulesList)).build())
+                .build();
+
+        ProcessingMapping ruleMapping = ProcessingMapping.newBuilder()
+                .setMappingType(MappingType.MAPPING_TYPE_TRANSFORM)
+                .setTransformConfig(transformConfig)
+                .build();
+
+        ApplyMappingRequest request = ApplyMappingRequest.newBuilder()
+                .setDocument(sourceDoc)
+                .addRules(MappingRule.newBuilder().addCandidateMappings(ruleMapping))
+                .build();
+
+        PipeDoc resultDoc = service.applyMapping(request).await().indefinitely().getDocument();
+        assertTrue(!resultDoc.getSearchMetadata().getCustomFields().getFieldsMap().containsKey("to_clear"));
+
+        // items should be a list with 2 entries
+        var items = resultDoc.getSearchMetadata().getCustomFields().getFieldsOrThrow("items").getListValue().getValuesList();
+        assertEquals("a", items.get(0).getStringValue());
+        assertEquals("b", items.get(1).getStringValue());
     }
 
     @Test

@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.quarkus)
     alias(libs.plugins.maven.publish)
     id 'signing'
+    id 'jacoco'
     alias(libs.plugins.nmcp.single)
     alias(libs.plugins.axion.release)
     alias(libs.plugins.proto.toolchain)
@@ -39,6 +40,12 @@ pipestreamProtos {
             gitRef = "main"
             gitSubdir = "admin"
         }
+        // Needed for module RPC return types like ProcessDataResponse (used by ProcessingBufferInterceptor)
+        register("pipeline-module") {
+            gitRepo = "https://github.com/ai-pipestream/pipestream-protos.git"
+            gitRef = "main"
+            gitSubdir = "pipeline-module"
+        }
     }
 }
 
@@ -50,8 +57,12 @@ dependencies {
 
     implementation libs.quarkus.grpc
     implementation libs.quarkus.arc
+    implementation libs.memoryfilesystem
+    // Needed by lifted MappingHelperJsonSupport (and generally useful for Quarkus)
+    implementation 'io.quarkus:quarkus-jackson'
     implementation 'io.quarkus:quarkus-smallrye-health'
     implementation 'io.quarkus:quarkus-smallrye-stork'
+    implementation 'io.quarkus:quarkus-smallrye-openapi'
 
     // Service discovery / registration plumbing
     implementation 'io.smallrye.stork:stork-service-discovery-consul'
@@ -63,6 +74,7 @@ dependencies {
     implementation 'ai.pipestream:pipestream-service-registration'
 
     testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.quarkus:quarkus-junit5-mockito'
 }
 
 group 'ai.pipestream'
@@ -77,6 +89,43 @@ java {
 
 test {
     systemProperty "java.util.logging.manager", "org.jboss.logmanager.LogManager"
+    finalizedBy jacocoTestReport
+
+    jacoco {
+        destinationFile = layout.buildDirectory.file("jacoco-quarkus.exec").get().asFile
+    }
+}
+
+jacocoTestReport {
+    // Don't count generated protobuf code towards service coverage.
+    // We only want coverage for our runtime/service/util code, not the massive generated message classes.
+    afterEvaluate {
+        def excluded = [
+                // any ".v1." package (directory /v1/) is assumed to be generated protobuf API
+                '**/v1/**',
+                // generated protos (packages)
+                'ai/pipestream/data/**',
+                'ai/pipestream/mapping/**',
+                'ai/pipestream/parsed/**',
+                'ai/pipestream/opensearch/**',
+                // module service protos (ProcessDataResponse, etc.)
+                'ai/pipestream/data/module/**',
+        ]
+
+        // Use main source set class dirs as the authoritative input, then filter.
+        classDirectories.setFrom(files(sourceSets.main.output.classesDirs.files.collect { dir ->
+            fileTree(dir: dir, exclude: excluded)
+        }))
+    }
+    // JaCoCo doesn't reliably clean stale HTML output; wipe before regenerating so excludes take effect.
+    doFirst {
+        delete layout.buildDirectory.dir("reports/jacoco/test/html")
+        delete layout.buildDirectory.file("reports/jacoco/test/jacocoTestReport.xml")
+    }
+    reports {
+        xml.required = true
+        html.required = true
+    }
 }
 
 compileJava {

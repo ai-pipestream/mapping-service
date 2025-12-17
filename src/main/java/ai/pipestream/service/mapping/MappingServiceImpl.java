@@ -1,6 +1,6 @@
 package ai.pipestream.service.mapping;
 
-import com.google.protobuf.Value;
+import ai.pipestream.service.mapping.util.ProtoFieldMapperImpl;
 import ai.pipestream.data.v1.*;
 import ai.pipestream.mapping.v1.ApplyMappingRequest;
 import ai.pipestream.mapping.v1.ApplyMappingResponse;
@@ -8,8 +8,11 @@ import ai.pipestream.mapping.v1.MappingRule;
 import ai.pipestream.mapping.v1.MutinyMappingServiceGrpc;
 import io.quarkus.grpc.GrpcService;
 import io.smallrye.mutiny.Uni;
+import com.google.protobuf.Value;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -17,6 +20,23 @@ import java.util.Optional;
 public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceImplBase {
 
     private static final Logger LOG = Logger.getLogger(MappingServiceImpl.class);
+
+    private final ProtoFieldMapperImpl protoFieldMapper;
+
+    /**
+     * Default constructor for non-CDI usage (e.g., plain unit tests).
+     */
+    public MappingServiceImpl() {
+        this(new ProtoFieldMapperImpl());
+    }
+
+    /**
+     * CDI constructor.
+     */
+    @Inject
+    public MappingServiceImpl(ProtoFieldMapperImpl protoFieldMapper) {
+        this.protoFieldMapper = protoFieldMapper;
+    }
 
     @Override
     public Uni<ApplyMappingResponse> applyMapping(ApplyMappingRequest request) {
@@ -66,10 +86,10 @@ public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceI
         String sourcePath = mapping.getSourceFieldPaths(0);
         String targetPath = mapping.getTargetFieldPaths(0);
 
-        Optional<Value> sourceValue = getFieldValue(docBuilder, sourcePath);
+        Optional<Object> sourceValue = getRawValue(docBuilder, sourcePath);
 
         if (sourceValue.isPresent()) {
-            setFieldValue(docBuilder, targetPath, sourceValue.get());
+            setRawValue(docBuilder, targetPath, sourceValue.get());
             return true;
         }
 
@@ -98,30 +118,30 @@ public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceI
         StringBuilder result = new StringBuilder();
         boolean first = true;
         for (String path : sourcePaths) {
-            Optional<Value> value = getFieldValue(docBuilder, path);
-            if (value.isEmpty() || value.get().getKindCase() != Value.KindCase.STRING_VALUE) {
+            Optional<Object> value = getRawValue(docBuilder, path);
+            if (value.isEmpty() || !(value.get() instanceof String)) {
                 return false; // A source field was missing or not a string
             }
             if (!first) {
                 result.append(delimiter);
             }
-            result.append(value.get().getStringValue());
+            result.append((String) value.get());
             first = false;
         }
-        setFieldValue(docBuilder, targetPath, Value.newBuilder().setStringValue(result.toString()).build());
+        setRawValue(docBuilder, targetPath, result.toString());
         return true;
     }
 
     private boolean handleSum(PipeDoc.Builder docBuilder, List<String> sourcePaths, String targetPath) {
         double sum = 0.0;
         for (String path : sourcePaths) {
-            Optional<Value> value = getFieldValue(docBuilder, path);
-            if (value.isEmpty() || value.get().getKindCase() != Value.KindCase.NUMBER_VALUE) {
+            Optional<Object> value = getRawValue(docBuilder, path);
+            if (value.isEmpty() || !(value.get() instanceof Number)) {
                 return false; // A source field was missing or not a number
             }
-            sum += value.get().getNumberValue();
+            sum += ((Number) value.get()).doubleValue();
         }
-        setFieldValue(docBuilder, targetPath, Value.newBuilder().setNumberValue(sum).build());
+        setRawValue(docBuilder, targetPath, sum);
         return true;
     }
 
@@ -131,20 +151,19 @@ public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceI
         }
 
         String sourcePath = mapping.getSourceFieldPaths(0);
-        Optional<Value> sourceValue = getFieldValue(docBuilder, sourcePath);
+        Optional<Object> sourceValue = getRawValue(docBuilder, sourcePath);
 
-        if (sourceValue.isEmpty() || sourceValue.get().getKindCase() != Value.KindCase.STRING_VALUE) {
+        if (sourceValue.isEmpty() || !(sourceValue.get() instanceof String)) {
             return false; // Source field must exist and be a string
         }
 
-        String[] splitValues = sourceValue.get().getStringValue().split(mapping.getSplitConfig().getDelimiter());
+        String[] splitValues = ((String) sourceValue.get()).split(mapping.getSplitConfig().getDelimiter());
 
         // Map the split values to the target fields, up to the number of targets specified
         for (int i = 0; i < mapping.getTargetFieldPathsCount(); i++) {
             if (i < splitValues.length) {
                 String targetPath = mapping.getTargetFieldPaths(i);
-                Value value = Value.newBuilder().setStringValue(splitValues[i]).build();
-                setFieldValue(docBuilder, targetPath, value);
+                setRawValue(docBuilder, targetPath, splitValues[i]);
             }
         }
 
@@ -152,20 +171,35 @@ public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceI
     }
 
     private boolean handleTransformMapping(PipeDoc.Builder docBuilder, ProcessingMapping mapping) {
+        TransformConfig config = mapping.getTransformConfig();
+
+        // "Beefed up" transform: allow executing the ProtoFieldMapper rule syntax via params.
+        // This avoids changing protos while still exposing the richer mapper features.
+        String ruleName = config.getRuleName() == null ? "" : config.getRuleName().toLowerCase();
+        switch (ruleName) {
+            case "proto_rules":
+            case "proto_rule":
+            case "rule":
+            case "rules":
+            case "proto_field_mapper":
+                return applyProtoRuleStrings(docBuilder, config);
+            default:
+                break;
+        }
+
         if (mapping.getSourceFieldPathsCount() != 1 || mapping.getTargetFieldPathsCount() != 1) {
             return false; // Invalid TRANSFORM mapping
         }
 
         String sourcePath = mapping.getSourceFieldPaths(0);
         String targetPath = mapping.getTargetFieldPaths(0);
-        TransformConfig config = mapping.getTransformConfig();
 
-        Optional<Value> sourceValue = getFieldValue(docBuilder, sourcePath);
+        Optional<Object> sourceValue = getRawValue(docBuilder, sourcePath);
         if (sourceValue.isEmpty()) {
             return false;
         }
 
-        switch (config.getRuleName().toLowerCase()) {
+        switch (ruleName) {
             case "uppercase":
                 return transformUppercase(docBuilder, targetPath, sourceValue.get());
             case "trim":
@@ -175,35 +209,120 @@ public class MappingServiceImpl extends MutinyMappingServiceGrpc.MappingServiceI
         }
     }
 
-    private boolean transformUppercase(PipeDoc.Builder docBuilder, String targetPath, Value value) {
-        if (value.getKindCase() != Value.KindCase.STRING_VALUE) {
+    /**
+     * Executes {@link ai.pipestream.service.mapping.util.ProtoFieldMapperImpl} rule syntax against a {@link PipeDoc}.
+     *
+     * <p>Rules are passed through {@code TransformConfig.params}:
+     * <ul>
+     *   <li>{@code rule}: single string rule</li>
+     *   <li>{@code rules}: list of string rules</li>
+     * </ul>
+     *
+     * <p>Example rule strings:
+     * <ul>
+     *   <li>{@code search_metadata.custom_fields.output = search_metadata.custom_fields.headline}</li>
+     *   <li>{@code search_metadata.custom_fields.flag = true}</li>
+     *   <li>{@code -search_metadata.custom_fields.headline}</li>
+     * </ul>
+     */
+    private boolean applyProtoRuleStrings(PipeDoc.Builder docBuilder, TransformConfig config) {
+        if (!config.hasParams()) {
             return false;
         }
-        String upper = value.getStringValue().toUpperCase();
-        setFieldValue(docBuilder, targetPath, Value.newBuilder().setStringValue(upper).build());
+
+        List<String> rules = new ArrayList<>();
+        var fields = config.getParams().getFieldsMap();
+
+        Value ruleVal = fields.get("rule");
+        if (ruleVal != null && ruleVal.getKindCase() == Value.KindCase.STRING_VALUE) {
+            String r = ruleVal.getStringValue();
+            if (r != null && !r.isBlank()) {
+                rules.add(r);
+            }
+        }
+
+        Value rulesVal = fields.get("rules");
+        if (rulesVal != null && rulesVal.getKindCase() == Value.KindCase.LIST_VALUE) {
+            for (Value v : rulesVal.getListValue().getValuesList()) {
+                if (v.getKindCase() == Value.KindCase.STRING_VALUE) {
+                    String r = v.getStringValue();
+                    if (r != null && !r.isBlank()) {
+                        rules.add(r);
+                    }
+                }
+            }
+        }
+
+        if (rules.isEmpty()) {
+            return false;
+        }
+
+        try {
+            // Apply in-place so later rules can see earlier changes without rebuilding messages.
+            protoFieldMapper.mapInPlace(docBuilder, rules);
+            return true;
+        } catch (ProtoFieldMapperImpl.MappingException e) {
+            LOG.debugf(e, "Failed to apply proto rule(s): %s", rules);
+            return false;
+        }
+    }
+
+    private boolean transformUppercase(PipeDoc.Builder docBuilder, String targetPath, Object value) {
+        if (!(value instanceof String)) {
+            return false;
+        }
+        String upper = ((String) value).toUpperCase();
+        setRawValue(docBuilder, targetPath, upper);
         return true;
     }
 
-    private boolean transformTrim(PipeDoc.Builder docBuilder, String targetPath, Value value) {
-        if (value.getKindCase() != Value.KindCase.STRING_VALUE) {
+    private boolean transformTrim(PipeDoc.Builder docBuilder, String targetPath, Object value) {
+        if (!(value instanceof String)) {
             return false;
         }
-        String trimmed = value.getStringValue().trim();
-        setFieldValue(docBuilder, targetPath, Value.newBuilder().setStringValue(trimmed).build());
+        String trimmed = ((String) value).trim();
+        setRawValue(docBuilder, targetPath, trimmed);
         return true;
     }
 
-    private Optional<Value> getFieldValue(PipeDoc.Builder docBuilder, String path) {
-        // For now, we only support top-level custom fields.
-        // This can be expanded to support nested paths (JSONPath-like).
-        if (docBuilder.getSearchMetadata().getCustomFields().getFieldsMap().containsKey(path)) {
-            return Optional.of(docBuilder.getSearchMetadata().getCustomFields().getFieldsMap().get(path));
+    private Optional<Object> getRawValue(PipeDoc.Builder docBuilder, String path) {
+        try {
+            Object raw = protoFieldMapper.getValue(docBuilder, normalizePath(path));
+            if (raw == null) {
+                return Optional.empty();
+            }
+            return Optional.of(raw);
+        } catch (ProtoFieldMapperImpl.MappingException e) {
+            LOG.debugf(e, "Failed to read path '%s' from PipeDoc", path);
+            return Optional.empty();
         }
-        return Optional.empty();
     }
 
-    private void setFieldValue(PipeDoc.Builder docBuilder, String path, Value value) {
-        // For now, we only support top-level custom fields.
-        docBuilder.getSearchMetadataBuilder().getCustomFieldsBuilder().putFields(path, value);
+    private void setRawValue(PipeDoc.Builder docBuilder, String path, Object value) {
+        try {
+            protoFieldMapper.setValue(docBuilder, normalizePath(path), value);
+        } catch (ProtoFieldMapperImpl.MappingException e) {
+            LOG.debugf(e, "Failed to write path '%s' on PipeDoc", path);
+        }
+    }
+
+    /**
+     * Maintains the current service contract: a bare path like {@code "headline"} refers to
+     * {@code search_metadata.custom_fields.headline}.
+     *
+     * <p>If callers want to map non-custom fields, they should provide an explicit dot path.
+     */
+    private static String normalizePath(String path) {
+        if (path == null) {
+            return null;
+        }
+        String p = path.trim();
+        if (p.isEmpty()) {
+            return p;
+        }
+        if (p.contains(".")) {
+            return p;
+        }
+        return "search_metadata.custom_fields." + p;
     }
 }
