@@ -23,7 +23,7 @@ scmVersion {
     }
 }
 
-def pipestreamBomVersion = findProperty('pipestreamBomVersion') ?: '0.7.8'
+def pipestreamBomVersion = findProperty('pipestreamBomVersion') ?: '0.7.9'
 
 // Proto toolchain configuration - fetches from Git and generates Java/gRPC code
 pipestreamProtos {
